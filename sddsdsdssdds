@@ -1,0 +1,219 @@
+from asyncio.tasks import current_task
+from locale import normalize
+from os import link
+import json
+
+from zmq import PROTOCOL_ERROR_ZMTP_MALFORMED_COMMAND_UNSPECIFIED
+import config
+from discord.ext import commands
+import discord
+import asyncio
+from youtube_dl import YoutubeDL
+
+YDL_OPTIONS = {'format': 'worstaudio/best', 'noplaylist': 'False', 'simulate': 'True', 'preferredquality': '192', 'preferredcodec': 'mp3', 'key': 'FFmpegExtractAudio'}
+FFMPEG_OPTIONS = {'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5', 'options': '-vn'}
+
+bot = commands.Bot(command_prefix='.')
+bot.remove_command("help")
+
+@bot.event
+async def on_ready():
+    print('Бот Запущен.')
+
+@bot.event
+async def on_message(message):
+    if message.author == bot.user:
+        return
+    if message.content.startswith('.'):
+        if message.content == '.refresh':
+            refresh()
+        else:
+            response = get_city(message.content)
+            await message.channel.send(response)
+
+def parse_city_json(json_file='russia_json'):
+    p_obj = None
+    try:
+        js_obj = open(json_file, "r", encoding="utf-8")
+        p_obj = json.load(js_obj)
+    except Exception as err:
+        print(err)
+        return None
+    finally:
+        js_obj.close()
+    return [city['city'].lower() for city in p_obj]
+
+def get_city(city):
+    normalize_city = city.strip().lower()[1:]
+    if is_correct_city_name(normalize_city):
+        if get_city.previous_city != "" and normalize_city[0] != get_city.previous_city[-1]:
+            return 'Город должен начинаться на "{0}"'.format(get_city.previous_city[-1])
+
+        if normalize_city not in cities_already_named:
+            cities_already_named.add(normalize_city) 
+            last_latter_city = normalize_city[-1]
+            proposed_names = list(filter(lambda x: x[0] == last_latter_city, cities))
+            if proposed_names:
+                for city in proposed_names:
+                    if city not in cities_already_named:
+                        cities_already_named.add(city)
+                        get_city.previous_city = city 
+                        return city.capitalize()
+            return 'Я не знаю города на эту букву. Ты выиграл'
+        else:
+            return 'Город уже был. Повторите попытку снова'
+    else:
+        return 'Некорректное название города. Повторите попытку опять'
+    
+    get_city.previous_city = ""
+
+    def is_correct_city_name(city):
+        return city[-1].isalpha() and city[-1] not in ('ь', 'ъ')
+
+    def refresh():
+        cities = parse_city_json()[:1000]
+        cities_already_named = set()
+
+@bot.command()
+async def sum(ctx, x: int, y: int):
+    await ctx.send(x+y)
+
+@bot.command()
+async def help(ctx):
+    emb = discord.Embed(title="Помощь", description="Пользовательские команды", colour=discord.Colour.green())
+
+    emb.add_field(name="help", value="Пояснение команд")
+
+    await ctx.send(embed=emb)
+
+@bot.command()
+@commands.has_permissions( administrator = True )     
+async def ahelp(ctx):
+    emb = discord.Embed(title="Помощь", description="Административное", colour=discord.Colour.green())
+
+    emb.add_field(name="ban", value="Банит игрока")
+    emb.add_field(name="unban", value="Разбанивает игрока")
+    emb.add_field(name="kick", value="Кикает игрока")
+    emb.add_field(name="clear", value="Очищяет Чат")
+    
+    await ctx.send(embed=emb)
+
+
+@bot.command()
+async def clear(ctx, count: int):
+    await ctx.channel.purge(limit=count+1)
+    await ctx.send(f"Было удаленно {count} сообщений.")
+
+@bot.command()
+async def ban(ctx, member: discord.Member = None, time = None, *, reason: str = None):
+    time_letter = time[-1:]
+    time_numbers = int(time[:-1])
+
+    def t(time_Letter):
+        if time_letter == 's':
+            return 1
+        if time_letter == 'm':
+            return 60
+        if time_letter == 'h':
+            return 60*60
+        if time_letter == 'd':
+            return 60*60*24
+
+    async def unb(member):
+        users = await ctx.guild.bans()
+        for ban_user in users:
+            if ban_user.user == member:
+                await ctx.guild.unban(ban_user.user)
+
+
+    if member:
+        if time:
+            time_letter = time[-1:]
+            time_numbers = int(time[:-1])
+
+            def t(time_Letter):
+                if time_letter == 's':
+                    return 1
+                if time_letter == 'm':
+                    return 60
+                if time_letter == 'h':
+                    return 60*60
+                if time_letter == 'd':
+                    return 60*60*24
+            if reason:
+                await member.ban(reason=reason)
+                await ctx.send(embed=discord.Embed(description=f'Пользователь {member.mention} был Забанен \nна: {time} \nПричина: {reason}'))
+
+                await asyncio.sleep(time_numbers*t(time_letter))
+
+                await unb(member)
+                await ctx.send(f'Пользователь {member.mention} Разбанен')
+                
+
+            else:
+                await member.ban()
+                await ctx.send(embed=discord.Embed(description=f'Пользователь {member.mention} был Забанен \nна: {time}.'))
+
+                await asyncio.sleep(time_numbers*t(time_letter))
+
+                await unb(member)
+                await ctx.send(f'Пользователь {member.mention} Разбанен.')
+        else:
+            await member.ban()
+            await ctx.send(embed=discord.Embed(description=f'Пользователь {member.mention} был Забанен.'))
+    else:
+        await ctx.send('Введите имя пользователя.')
+
+
+@bot.command()
+async def unban(ctx, id_: int = None):
+    if id_:
+        banned_users = await ctx.guild.bans()
+        member_full = bot.get_user(id=id_)
+        for ban in banned_users:
+            if ban.user == member_full:
+                await ctx.guild.unban(ban.user)
+        await ctx.send('Пользователь разбанен.')
+    else:
+        await ctx.send('Введите айди.')
+
+@bot.command()
+async def kick(ctx, member: discord.Member = None, *, reason:str =None):
+    if member:
+        if reason:
+            await member.kick(reason=reason)
+            await ctx.send(embed=discord.Embed(description=f'Пользователь {member.mention} был кикнут \nПричина: {reason}' ))
+        else:
+            await member.kick()
+            await ctx.send(embed=discord.Embed(description=f'Пользователь {member.mention} был кикнут'))
+    else: 
+        await ctx.send('Введите имя пользователя')
+
+
+@bot.command()
+@commands.has_permissions( administrator = True )
+
+async def mute( ctx, member: discord.Member ):
+    await ctx.channel.purge( limit = 1 )
+
+    mute_role = discord.utils.get( ctx.message.guild.roles, name = 'mute')
+
+    await member.add_roles( mute_role )
+    await ctx.send( f'{ member.mention } Получил мут за нарушения правил сервера.' )
+
+@bot.command()
+async def play(ctx, *, arg):
+    vc = await ctx.message.author.voice.channel.connect()
+ 
+    with YoutubeDL(YDL_OPTIONS) as ydl:
+        if 'https://' in arg:
+            info = ydl.extract_info(arg, download=False)
+        else:
+            info = ydl.extract_info(f"ytsearch:{arg}", download=False)['entries'][0]
+ 
+    url = info['formats'][0]['url']
+ 
+    vc.play(discord.FFmpegPCMAudio(executable="C:\\botpython\\discord bot\\ffmpeg\\ffmpeg.exe", source = url, **FFMPEG_OPTIONS))
+
+
+bot.run(config.token)
